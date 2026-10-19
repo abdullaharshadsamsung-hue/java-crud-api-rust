@@ -22,6 +22,13 @@
 //! framework exceptions. Only the ones this service can actually produce
 //! have variants here. Axum extractor rejections are mapped to these
 //! variants by the custom extractors in `src/extract.rs`.
+//!
+//! MIGRATION_NOTE: `crate::models::error_message::ErrorMessage` keeps its
+//! fields private, so it cannot be built with a struct literal here. The
+//! 404 body is serialized through [`NotFoundBody`], a module-local struct
+//! with exactly the same JSON shape (`{"status":..., "message":...}`, both
+//! nullable). The wire format is identical to Jackson serializing
+//! `new ErrorMessage(HttpStatus.NOT_FOUND, exception.getMessage())`.
 
 use std::error::Error as StdError;
 use std::fmt;
@@ -32,8 +39,6 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::models::error_message::ErrorMessage;
-
 /// Boxed, thread-safe error used for opaque internal failures.
 pub type BoxError = Box<dyn StdError + Send + Sync + 'static>;
 
@@ -41,7 +46,7 @@ pub type BoxError = Box<dyn StdError + Send + Sync + 'static>;
 ///
 /// `message` is `Option` because Java's no-arg constructor leaves
 /// `getMessage()` as `null`. That `null` is serialized as JSON `null`, and
-/// it is never converted to `""`.
+/// it is never converted to `""`. An empty string stays `""`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UserNotFoundError {
     pub message: Option<String>,
@@ -157,6 +162,30 @@ impl From<BoxError> for AppError {
     }
 }
 
+/// Explicit lookup table for Spring's `HttpStatus.name()`, covering the
+/// statuses this service emits. Jackson serializes `HttpStatus` as its enum
+/// constant name, so this table gives the wire value.
+pub fn http_status_name(status: StatusCode) -> Option<&'static str> {
+    match status.as_u16() {
+        400 => Some("BAD_REQUEST"),
+        404 => Some("NOT_FOUND"),
+        405 => Some("METHOD_NOT_ALLOWED"),
+        406 => Some("NOT_ACCEPTABLE"),
+        415 => Some("UNSUPPORTED_MEDIA_TYPE"),
+        500 => Some("INTERNAL_SERVER_ERROR"),
+        _ => None,
+    }
+}
+
+/// JSON body of the `UserNotFoundException` handler. It has the same wire
+/// shape as `com.smartContact.model.ErrorMessage`: `{"status":"NOT_FOUND",
+/// "message":...}`. `None` serializes as `null`, as Jackson does.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotFoundBody {
+    pub status: Option<String>,
+    pub message: Option<String>,
+}
+
 /// Spring Boot `DefaultErrorAttributes` body used for 500 responses.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BootErrorBody {
@@ -172,9 +201,8 @@ impl IntoResponse for AppError {
             // @ExceptionHandler(UserNotFoundException.class):
             // new ErrorMessage(HttpStatus.NOT_FOUND, exception.getMessage())
             AppError::NotFound(e) => {
-                let body = ErrorMessage {
-                    // HttpStatus.NOT_FOUND.name()
-                    status: Some("NOT_FOUND".to_string()),
+                let body = NotFoundBody {
+                    status: http_status_name(StatusCode::NOT_FOUND).map(str::to_string),
                     message: e.message,
                 };
                 (StatusCode::NOT_FOUND, Json(body)).into_response()
@@ -256,5 +284,19 @@ mod tests {
             AppError::UnsupportedMediaType.status_code(),
             StatusCode::UNSUPPORTED_MEDIA_TYPE
         );
+    }
+
+    #[test]
+    fn status_names() {
+        assert_eq!(http_status_name(StatusCode::NOT_FOUND), Some("NOT_FOUND"));
+        assert_eq!(http_status_name(StatusCode::IM_A_TEAPOT), None);
+    }
+
+    #[test]
+    fn not_found_response_status() {
+        let resp = AppError::from(UserNotFoundError::new("User are not available")).into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = AppError::from(UserNotFoundError::default()).into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }
