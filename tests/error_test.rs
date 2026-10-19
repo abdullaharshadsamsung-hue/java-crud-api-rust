@@ -32,7 +32,7 @@ async fn not_found_empty() -> Result<String, AppError> {
     Err(UserNotFoundError::new("").into())
 }
 async fn bad_request() -> Result<String, AppError> {
-    Err(AppError::BadRequest)
+    Err(AppError::BadRequest(String::new()))
 }
 async fn unsupported() -> Result<String, AppError> {
     Err(AppError::UnsupportedMediaType)
@@ -181,7 +181,7 @@ async fn not_acceptable_returns_406_empty_body() {
 #[tokio::test]
 async fn framework_errors_are_4xx_not_500() {
     for e in [
-        AppError::BadRequest,
+        AppError::BadRequest(String::new()),
         AppError::UnsupportedMediaType,
         AppError::MethodNotAllowed,
         AppError::NotAcceptable,
@@ -241,9 +241,9 @@ fn user_not_found_error_display_and_accessors() {
     assert_eq!(n.message(), None);
     assert_eq!(n.to_string(), "UserNotFoundException");
     assert_eq!(AppError::from(e).to_string(), "not found: msg");
-    assert_eq!(AppError::BadRequest.to_string(), "bad request");
+    assert_eq!(AppError::BadRequest(String::new()).to_string(), "bad request");
     assert_eq!(
-        AppError::Internal { path: "/x".into() }.to_string(),
+        AppError::internal("cause").with_path("/x").to_string(),
         "internal server error"
     );
 }
