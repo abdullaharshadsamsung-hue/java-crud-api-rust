@@ -55,7 +55,17 @@ pub const USER_SELECT_COLUMNS: &str = "user_id AS id, user_name AS name, user_em
 /// Runs the `user` DDL unconditionally. The statement is idempotent
 /// (`IF NOT EXISTS`). Prefer [`UserRepository`], which calls this for you.
 pub async fn ensure_user_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
-    sqlx::query(CREATE_USER_TABLE_SQL).execute(pool).await?;
+    // Concurrent `CREATE TABLE IF NOT EXISTS` statements from separate pools
+    // can race in PostgreSQL (duplicate key on pg_type). Serialize them with a
+    // transaction-scoped advisory lock.
+    const USER_SCHEMA_LOCK_KEY: i64 = 0x5553_4552_5343_484D; // "USERSCHM"
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(USER_SCHEMA_LOCK_KEY)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(CREATE_USER_TABLE_SQL).execute(&mut *tx).await?;
+    tx.commit().await?;
     Ok(())
 }
 
