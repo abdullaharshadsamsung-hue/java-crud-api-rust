@@ -360,9 +360,17 @@ async fn health() -> Json<Value> {
 /// Builds the user service from the configured database URL (DATABASE_URL).
 /// The pool connects lazily, so no connection is opened until first use.
 fn build_user_service(config: &Config) -> UserServiceImp {
-    let pool = PgPoolOptions::new()
-        .connect_lazy(&config.database_url)
-        .expect("DATABASE_URL must be a valid postgres connection string");
+    // An empty/invalid URL must not panic while building the router (routes
+    // that never touch the DB still have to work); fall back to libpq-style
+    // defaults (PGHOST, PGUSER, ...) and let the first query report the error.
+    let opts = config
+        .database_url
+        .parse::<sqlx::postgres::PgConnectOptions>()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "invalid DATABASE_URL; using default connect options");
+            sqlx::postgres::PgConnectOptions::new()
+        });
+    let pool = PgPoolOptions::new().connect_lazy_with(opts);
     UserServiceImp::new(UserRepository::new(pool))
 }
 
