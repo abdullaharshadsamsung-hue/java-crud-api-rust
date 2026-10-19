@@ -1,354 +1,249 @@
-//! Integration tests for `src/error.rs` (migrated from the Java `UserNotFoundException`).
-
-use std::error::Error as StdError;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use serde_json::{json, Value};
+use serde_json::Value;
 use tower::ServiceExt;
 
 use migrated_service::config::Config;
-use migrated_service::error::{anyhow_like, AppError, BoxError, UserNotFoundError};
+use migrated_service::error::{AppError, BootErrorBody, UserNotFoundError};
 use migrated_service::{app, AppState};
 
-fn test_state() -> AppState {
+fn state() -> AppState {
     AppState {
         config: Arc::new(Config {
             port: 0,
             database_url: String::new(),
-            secret_key: "test-secret".to_string(),
+            secret_key: "test".to_string(),
         }),
     }
 }
 
-async fn body_json(resp: Response) -> Value {
+async fn not_found_msg() -> Result<String, AppError> {
+    Err(UserNotFoundError::new("User not found with id 5").into())
+}
+async fn not_found_null() -> Result<String, AppError> {
+    Err(UserNotFoundError::default().into())
+}
+async fn not_found_empty() -> Result<String, AppError> {
+    Err(UserNotFoundError::new("").into())
+}
+async fn bad_request() -> Result<String, AppError> {
+    Err(AppError::BadRequest)
+}
+async fn unsupported() -> Result<String, AppError> {
+    Err(AppError::UnsupportedMediaType)
+}
+async fn not_allowed() -> Result<String, AppError> {
+    Err(AppError::MethodNotAllowed)
+}
+async fn not_acceptable() -> Result<String, AppError> {
+    Err(AppError::NotAcceptable)
+}
+async fn internal() -> Result<String, AppError> {
+    Err(AppError::internal("db exploded").with_path("/boom"))
+}
+async fn sqlx_fail() -> Result<String, AppError> {
+    Err(AppError::from(sqlx::Error::RowNotFound))
+}
+
+fn router() -> Router {
+    let extra: Router = Router::new()
+        .route("/users/five", get(not_found_msg).post(not_found_msg).put(not_found_msg))
+        .route("/contacts/five", get(not_found_msg).delete(not_found_msg))
+        .route("/users/null", get(not_found_null))
+        .route("/users/empty", get(not_found_empty))
+        .route("/bad", get(bad_request).post(bad_request))
+        .route("/unsupported", get(unsupported).post(unsupported))
+        .route("/notallowed", get(not_allowed))
+        .route("/notacceptable", get(not_acceptable))
+        .route("/boom", get(internal))
+        .route("/sqlx", get(sqlx_fail))
+        .route("/only-get", get(|| async { "ok" }));
+    app(state()).merge(extra)
+}
+
+async fn send(method: Method, uri: &str) -> (StatusCode, Vec<u8>) {
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap();
+    let resp = router().oneshot(req).await.unwrap();
+    let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
-        .expect("read body");
-    serde_json::from_slice(&bytes).expect("valid json")
+        .unwrap();
+    (status, bytes.to_vec())
 }
 
-/// The application router plus test routes whose handlers fail with
-/// `UserNotFoundError` converted via `?`.
-fn router_with_error_routes() -> Router {
-    async fn no_message() -> Result<String, AppError> {
-        Err(UserNotFoundError::new())?
-    }
-    async fn with_message() -> Result<String, AppError> {
-        Err(UserNotFoundError::with_message("User not found"))?
-    }
-    async fn with_message_and_cause() -> Result<String, AppError> {
-        Err(UserNotFoundError::with_message_and_cause(
-            "missing",
-            anyhow_like::Error("db down".into()),
-        ))?
-    }
-    async fn with_cause() -> Result<String, AppError> {
-        Err(UserNotFoundError::with_cause(anyhow_like::Error(
-            "db down".into(),
-        )))?
-    }
-    async fn ok() -> Result<String, AppError> {
-        Ok("fine".to_string())
-    }
-
-    app(test_state()).merge(
-        Router::new()
-            .route("/unf/none", get(no_message))
-            .route("/unf/message", get(with_message))
-            .route("/unf/message-cause", get(with_message_and_cause))
-            .route("/unf/cause", get(with_cause))
-            .route("/ok", get(ok)),
-    )
-}
-
-async fn get_req(router: Router, uri: &str) -> Response {
-    router
-        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-        .await
-        .expect("oneshot")
-}
-
-fn assert_is_error<T: StdError + Send + Sync + 'static>() {}
-
-// ---------- UserNotFoundException() ----------
-
-#[test]
-fn no_arg_constructor_has_no_message_and_no_cause() {
-    let e = UserNotFoundError::new();
-    assert!(e.message().is_none());
-    assert!(e.source().is_none());
-    // Display falls back to a generic text rather than panicking.
-    assert_eq!(e.to_string(), "user not found");
-}
-
-#[test]
-fn default_equals_new() {
-    let e = UserNotFoundError::default();
-    assert!(e.message().is_none());
-    assert!(e.source().is_none());
-}
-
-#[test]
-fn is_a_proper_error_type() {
-    assert_is_error::<UserNotFoundError>();
-    let boxed: BoxError = Box::new(UserNotFoundError::new());
-    assert!(boxed.downcast_ref::<UserNotFoundError>().is_some());
-}
-
-// ---------- UserNotFoundException(String) ----------
-
-#[test]
-fn message_constructor_stores_message_exactly() {
-    let e = UserNotFoundError::with_message("User not found");
-    assert_eq!(e.message(), Some("User not found"));
-    assert!(e.source().is_none());
-    assert_eq!(e.to_string(), "User not found");
-}
-
-#[test]
-fn message_constructor_accepts_owned_string() {
-    let msg = String::from("User are not available");
-    let e = UserNotFoundError::with_message(msg.clone());
-    assert_eq!(e.message(), Some(msg.as_str()));
-}
-
-#[test]
-fn null_message_equivalent_is_absent_message() {
-    // Java `new UserNotFoundException((String) null)` -> Rust `new()`.
-    let e = UserNotFoundError::new();
-    assert_eq!(e.message(), None);
-    assert!(e.source().is_none());
-}
-
-#[test]
-fn empty_message_is_stored() {
-    let e = UserNotFoundError::with_message("");
-    assert_eq!(e.message(), Some(""));
-}
-
-// ---------- UserNotFoundException(String, Throwable) ----------
-
-#[test]
-fn message_and_cause_constructor_stores_both() {
-    let e = UserNotFoundError::with_message_and_cause(
-        "missing",
-        anyhow_like::Error("runtime failure".into()),
-    );
-    assert_eq!(e.message(), Some("missing"));
-    let src = e.source().expect("cause present");
-    let cause = src
-        .downcast_ref::<anyhow_like::Error>()
-        .expect("same cause type");
-    assert_eq!(cause.0, "runtime failure");
-    // message is not derived from the cause
-    assert_ne!(e.message(), Some("runtime failure"));
-    assert_eq!(e.to_string(), "missing");
-}
-
-#[test]
-fn message_and_cause_preserves_cause_identity() {
-    let cause: BoxError = Box::new(anyhow_like::Error("x".into()));
-    let ptr = cause.as_ref() as *const (dyn StdError + Send + Sync) as *const u8;
-    let e = UserNotFoundError::with_message_and_cause("missing", cause);
-    let src_ptr = e.source().unwrap() as *const dyn StdError as *const u8;
-    assert_eq!(ptr, src_ptr);
-}
-
-#[test]
-fn message_and_cause_accepts_string_cause() {
-    let e = UserNotFoundError::with_message_and_cause("missing", "io broke");
-    assert_eq!(e.message(), Some("missing"));
-    assert_eq!(e.source().unwrap().to_string(), "io broke");
-}
-
-#[test]
-fn message_with_null_cause_equivalent_has_no_source() {
-    // Java `(message, null)` -> Rust `with_message(message)`.
-    let e = UserNotFoundError::with_message("missing");
-    assert_eq!(e.message(), Some("missing"));
-    assert!(e.source().is_none());
-}
-
-#[test]
-fn nested_cause_chain_is_walkable() {
-    let inner = UserNotFoundError::with_message("inner");
-    let outer = UserNotFoundError::with_message_and_cause("outer", inner);
-    let first = outer.source().unwrap();
-    assert_eq!(first.to_string(), "inner");
-    assert!(first.source().is_none());
-}
-
-// ---------- UserNotFoundException(Throwable) ----------
-
-#[test]
-fn cause_constructor_derives_message_from_cause() {
-    let e = UserNotFoundError::with_cause(anyhow_like::Error("db down".into()));
-    assert_eq!(e.message(), Some("db down"));
-    let src = e.source().expect("cause present");
-    assert_eq!(src.to_string(), "db down");
-    assert_eq!(
-        src.downcast_ref::<anyhow_like::Error>().unwrap().0,
-        "db down"
-    );
-    assert_eq!(e.to_string(), "db down");
-}
-
-#[test]
-fn null_cause_equivalent_has_no_message_and_no_cause() {
-    // Java `new UserNotFoundException((Throwable) null)` -> Rust `new()`.
-    let e = UserNotFoundError::new();
-    assert!(e.message().is_none());
-    assert!(e.source().is_none());
-}
-
-// ---------- (message, cause, enableSuppression, writableStackTrace) ----------
-
-#[test]
-fn four_arg_constructor_collapses_into_message_and_cause() {
-    // Flags have no Rust equivalent; behaviour must equal (message, cause).
-    let e = UserNotFoundError::with_message_and_cause(
-        "msg",
-        anyhow_like::Error("cause".into()),
-    );
-    assert_eq!(e.message(), Some("msg"));
-    assert_eq!(e.source().unwrap().to_string(), "cause");
-}
-
-// ---------- Conversion into AppError ----------
-
-#[test]
-fn converts_into_app_error_user_not_found() {
-    let app_err: AppError = UserNotFoundError::with_message("User not found").into();
-    match app_err {
-        AppError::UserNotFound(m) => assert_eq!(m, "User not found"),
-        other => panic!("unexpected variant {other:?}"),
-    }
-}
-
-#[test]
-fn missing_message_converts_to_empty_string() {
-    let app_err: AppError = UserNotFoundError::new().into();
-    match app_err {
-        AppError::UserNotFound(m) => assert!(m.is_empty()),
-        other => panic!("unexpected variant {other:?}"),
-    }
-}
-
-#[test]
-fn app_error_display() {
-    assert_eq!(AppError::UserNotFound("abc".into()).to_string(), "abc");
-    assert_eq!(AppError::NotFound.to_string(), "not found");
-    assert_eq!(AppError::BadRequest("x".into()).to_string(), "bad request: x");
-    assert_eq!(AppError::Unauthorized.to_string(), "unauthorized");
-    let internal: AppError = anyhow_like::Error("boom".into()).into();
-    assert_eq!(internal.to_string(), "boom");
-}
-
-// ---------- HTTP rendering ----------
-
-#[tokio::test]
-async fn user_not_found_renders_404_with_message() {
-    let resp = AppError::UserNotFound("User are not available".into()).into_response();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    assert_eq!(
-        body_json(resp).await,
-        json!({ "status": "NOT_FOUND", "message": "User are not available" })
-    );
+fn json(bytes: &[u8]) -> Value {
+    serde_json::from_slice(bytes).expect("valid json body")
 }
 
 #[tokio::test]
-async fn user_not_found_empty_message_renders_null() {
-    let resp = AppError::UserNotFound(String::new()).into_response();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    assert_eq!(
-        body_json(resp).await,
-        json!({ "status": "NOT_FOUND", "message": null })
-    );
+async fn user_not_found_with_message_returns_404_error_message() {
+    let (status, body) = send(Method::GET, "/users/five").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let v = json(&body);
+    assert_eq!(v["status"], "NOT_FOUND");
+    assert_eq!(v["message"], "User not found with id 5");
+    assert_eq!(v.as_object().unwrap().len(), 2);
 }
 
 #[tokio::test]
-async fn other_variants_render_expected_status_and_body() {
-    let cases: Vec<(AppError, StatusCode, Value)> = vec![
-        (AppError::NotFound, StatusCode::NOT_FOUND, json!({"error": "not found"})),
-        (
-            AppError::BadRequest("bad id".into()),
-            StatusCode::BAD_REQUEST,
-            json!({"error": "bad request: bad id"}),
-        ),
-        (
-            AppError::Unauthorized,
-            StatusCode::UNAUTHORIZED,
-            json!({"error": "unauthorized"}),
-        ),
-        (
-            AppError::Internal(anyhow_like::Error("secret detail".into())),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            json!({"error": "internal server error"}),
-        ),
+async fn user_not_found_null_message_serializes_as_null() {
+    let (status, body) = send(Method::GET, "/users/null").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let v = json(&body);
+    assert_eq!(v["status"], "NOT_FOUND");
+    assert!(v.as_object().unwrap().contains_key("message"));
+    assert!(v["message"].is_null());
+}
+
+#[tokio::test]
+async fn user_not_found_empty_message_is_empty_string() {
+    let (status, body) = send(Method::GET, "/users/empty").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let v = json(&body);
+    assert_eq!(v["status"], "NOT_FOUND");
+    assert_eq!(v["message"], "");
+}
+
+#[tokio::test]
+async fn user_not_found_identical_across_paths_and_methods() {
+    let cases = vec![
+        (Method::GET, "/users/five"),
+        (Method::POST, "/users/five"),
+        (Method::PUT, "/users/five"),
+        (Method::GET, "/contacts/five"),
+        (Method::DELETE, "/contacts/five"),
+        (Method::GET, "/users/five?x=1&y=2"),
     ];
-    for (err, status, body) in cases {
-        let resp = err.into_response();
-        assert_eq!(resp.status(), status);
-        assert_eq!(body_json(resp).await, body);
+    let (_, reference) = send(Method::GET, "/users/five").await;
+    let reference = json(&reference);
+    for (m, uri) in cases {
+        let (status, body) = send(m.clone(), uri).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{m} {uri}");
+        assert_eq!(json(&body), reference, "{m} {uri}");
     }
 }
 
-// ---------- Through the Router ----------
-
 #[tokio::test]
-async fn health_still_works() {
-    let resp = get_req(router_with_error_routes(), "/health").await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(body_json(resp).await, json!({"status": "ok"}));
+async fn user_not_found_never_becomes_500() {
+    let err: AppError = UserNotFoundError::new("x").into();
+    assert_eq!(err.status_code(), StatusCode::NOT_FOUND);
+    let resp: Response = AppError::from(UserNotFoundError::new("x")).into_response();
+    assert_ne!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    // with_path leaves NotFound unchanged
+    let e = AppError::from(UserNotFoundError::new("y")).with_path("/p");
+    match e {
+        AppError::NotFound(inner) => assert_eq!(inner.message(), Some("y")),
+        other => panic!("unexpected {other:?}"),
+    }
 }
 
 #[tokio::test]
-async fn handler_ok_path_unaffected() {
-    let resp = get_req(router_with_error_routes(), "/ok").await;
-    assert_eq!(resp.status(), StatusCode::OK);
+async fn bad_request_returns_400_empty_body() {
+    for m in [Method::GET, Method::POST] {
+        let (status, body) = send(m, "/bad").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.is_empty());
+    }
 }
 
 #[tokio::test]
-async fn handler_with_no_message_error_returns_404_null_message() {
-    let resp = get_req(router_with_error_routes(), "/unf/none").await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+async fn unsupported_media_type_returns_415_empty_body() {
+    let (status, body) = send(Method::POST, "/unsupported").await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn method_not_allowed_returns_405() {
+    let (status, body) = send(Method::GET, "/notallowed").await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert!(body.is_empty());
+    let (status, _) = send(Method::DELETE, "/only-get").await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn not_acceptable_returns_406_empty_body() {
+    let (status, body) = send(Method::GET, "/notacceptable").await;
+    assert_eq!(status, StatusCode::NOT_ACCEPTABLE);
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn framework_errors_are_4xx_not_500() {
+    for e in [
+        AppError::BadRequest,
+        AppError::UnsupportedMediaType,
+        AppError::MethodNotAllowed,
+        AppError::NotAcceptable,
+    ] {
+        assert!(e.status_code().is_client_error(), "{e}");
+    }
+}
+
+#[tokio::test]
+async fn unhandled_errors_fall_through_to_boot_style_500() {
+    let (status, body) = send(Method::GET, "/boom").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let b: BootErrorBody = serde_json::from_slice(&body).unwrap();
+    assert_eq!(b.status, 500);
+    assert_eq!(b.error, "Internal Server Error");
+    assert_eq!(b.path, "/boom");
+    assert!(!String::from_utf8_lossy(&body).contains("db exploded"));
+    let ts = b.timestamp;
+    assert_eq!(ts.len(), 29, "{ts}");
+    assert!(ts.ends_with("+00:00"));
+    assert_eq!(&ts[4..5], "-");
+    assert_eq!(&ts[10..11], "T");
+    assert_eq!(&ts[19..20], ".");
+    let year: i32 = ts[0..4].parse().unwrap();
+    assert!(year >= 2024);
+}
+
+#[tokio::test]
+async fn sqlx_error_maps_to_500() {
+    let (status, body) = send(Method::GET, "/sqlx").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let v = json(&body);
+    assert_eq!(v["status"], 500);
+    assert_eq!(v["path"], "");
+}
+
+#[tokio::test]
+async fn box_error_maps_to_internal() {
+    let boxed: migrated_service::error::BoxError = "oops".into();
+    let e = AppError::from(boxed);
+    assert_eq!(e.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn health_still_works_alongside_errors() {
+    let (status, body) = send(Method::GET, "/health").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json(&body)["status"], "ok");
+}
+
+#[test]
+fn user_not_found_error_display_and_accessors() {
+    let e = UserNotFoundError::new("msg");
+    assert_eq!(e.message(), Some("msg"));
+    assert_eq!(e.to_string(), "msg");
+    let n = UserNotFoundError::default();
+    assert_eq!(n.message(), None);
+    assert_eq!(n.to_string(), "UserNotFoundException");
+    assert_eq!(AppError::from(e).to_string(), "not found: msg");
+    assert_eq!(AppError::BadRequest.to_string(), "bad request");
     assert_eq!(
-        body_json(resp).await,
-        json!({ "status": "NOT_FOUND", "message": null })
-    );
-}
-
-#[tokio::test]
-async fn handler_with_message_error_returns_404_message() {
-    let resp = get_req(router_with_error_routes(), "/unf/message").await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    assert_eq!(
-        body_json(resp).await,
-        json!({ "status": "NOT_FOUND", "message": "User not found" })
-    );
-}
-
-#[tokio::test]
-async fn handler_with_message_and_cause_uses_message_only() {
-    let resp = get_req(router_with_error_routes(), "/unf/message-cause").await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    assert_eq!(
-        body_json(resp).await,
-        json!({ "status": "NOT_FOUND", "message": "missing" })
-    );
-}
-
-#[tokio::test]
-async fn handler_with_cause_uses_derived_message() {
-    let resp = get_req(router_with_error_routes(), "/unf/cause").await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    assert_eq!(
-        body_json(resp).await,
-        json!({ "status": "NOT_FOUND", "message": "db down" })
+        AppError::Internal { path: "/x".into() }.to_string(),
+        "internal server error"
     );
 }
