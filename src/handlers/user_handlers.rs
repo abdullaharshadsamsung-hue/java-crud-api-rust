@@ -6,22 +6,17 @@
 //! renders Spring-compatible responses (empty-body 400/415, 404 `ErrorMessage`
 //! JSON, Boot-style 500 JSON).
 //!
-//! Routes (axum 0.7 path syntax):
+//! Routes (axum 0.8 path syntax):
 //! * `POST   /save_user_data`              -> [`save_user`]
 //! * `GET    /get_user_data`               -> [`fetch_user_list`]
-//! * `GET    /get_user_data/:id`           -> [`fetch_user_by_id`]
-//! * `DELETE /delete_user_data/:id`        -> [`delete_user`]
-//! * `PUT    /update_user_data/:id`        -> [`update_user`]
-//! * `GET    /get_user_name/name/:name`    -> [`get_user_name_by_name`]
+//! * `GET    /get_user_data/{id}`          -> [`fetch_user_by_id`]
+//! * `DELETE /delete_user_data/{id}`       -> [`delete_user`]
+//! * `PUT    /update_user_data/{id}`       -> [`update_user`]
+//! * `GET    /get_user_name/name/{name}`   -> [`get_user_name_by_name`]
 //!
-//! MIGRATION_NOTE: `AppState` in `src/lib.rs` currently only carries `config`.
-//! These handlers therefore use their own state type, [`UserHandlerState`],
-//! and expose [`user_routes`], which returns a ready-to-merge `Router`
-//! (state already applied). Wire it up in `lib.rs::app()` with
-//! `.merge(handlers::user_handlers::user_routes(service))`, and declare
-//! `pub mod handlers;` (with `handlers/mod.rs` containing
-//! `pub mod user_handlers;`). Trailing-slash matching is expected to be
-//! provided by `NormalizePathLayer::trim_trailing_slash` in main.rs.
+//! These handlers use their own state type, [`UserHandlerState`], and
+//! expose [`user_routes`], which returns a ready-to-merge `Router`
+//! (state already applied). It is merged in `lib.rs::app()`.
 
 use std::sync::Arc;
 
@@ -55,10 +50,10 @@ pub fn user_routes(service: UserServiceImp) -> Router {
     Router::new()
         .route("/save_user_data", post(save_user))
         .route("/get_user_data", get(fetch_user_list))
-        .route("/get_user_data/:id", get(fetch_user_by_id))
-        .route("/delete_user_data/:id", delete(delete_user))
-        .route("/update_user_data/:id", put(update_user))
-        .route("/get_user_name/name/:name", get(get_user_name_by_name))
+        .route("/get_user_data/{id}", get(fetch_user_by_id))
+        .route("/delete_user_data/{id}", delete(delete_user))
+        .route("/update_user_data/{id}", put(update_user))
+        .route("/get_user_name/name/{name}", get(get_user_name_by_name))
         .with_state(UserHandlerState::new(service))
 }
 
@@ -67,13 +62,13 @@ pub fn user_routes(service: UserServiceImp) -> Router {
 fn json_rejection(rej: JsonRejection) -> AppError {
     match rej {
         JsonRejection::MissingJsonContentType(_) => AppError::UnsupportedMediaType,
-        _ => AppError::BadRequest,
+        other => AppError::BadRequest(other.body_text()),
     }
 }
 
 /// `@PathVariable` type mismatch -> 400 with an empty body.
-fn path_rejection(_rej: PathRejection) -> AppError {
-    AppError::BadRequest
+fn path_rejection(rej: PathRejection) -> AppError {
+    AppError::BadRequest(rej.body_text())
 }
 
 fn text_ok(body: &'static str) -> Response {
@@ -94,8 +89,8 @@ pub async fn save_user(
     tracing::info!("inside the saveUser of UserController ");
     let Json(user) = body.map_err(json_rejection)?;
     // Bean validation (@Valid): MethodArgumentNotValidException -> 400, empty body.
-    if user.validate().is_err() {
-        return Err(AppError::BadRequest);
+    if let Err(e) = user.validate() {
+        return Err(AppError::BadRequest(e.to_string()));
     }
     state
         .service
