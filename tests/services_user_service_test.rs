@@ -140,8 +140,12 @@ async fn save_user_blank_name_is_400_validation_error() {
 
     let resp = err.into_response();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body = body_json(resp).await;
-    assert!(body["error"].as_str().unwrap().contains(NAME_NOT_BLANK_MESSAGE));
+    // Spring's ResponseEntityExceptionHandler returns 400 with an empty body;
+    // the validation message is only carried by the error value.
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    assert!(bytes.is_empty());
 
     let err = save_user(&repo, User::default()).await.unwrap_err();
     assert!(matches!(err, AppError::BadRequest(_)));
@@ -160,7 +164,7 @@ async fn save_user_constraint_violation_is_500() {
     let resp = err.into_response();
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let body = body_json(resp).await;
-    assert_eq!(body["error"], "internal server error");
+    assert_eq!(body["error"], "Internal Server Error");
     assert_eq!(fetch_user_list(&repo).await.unwrap().len(), 1);
 }
 
@@ -205,7 +209,9 @@ async fn fetch_user_by_id_existing_returns_user() {
 async fn fetch_user_by_id_missing_is_user_not_found_404() {
     let Some(repo) = repo().await else { return };
     let err = fetch_user_by_id(&repo, 424242).await.unwrap_err();
-    assert!(matches!(err, AppError::UserNotFound(ref m) if m == USER_NOT_AVAILABLE_MESSAGE));
+    assert!(
+        matches!(err, AppError::NotFound(ref e) if e.message() == Some(USER_NOT_AVAILABLE_MESSAGE))
+    );
     assert_eq!(USER_NOT_AVAILABLE_MESSAGE, "User are not available");
 
     let resp = err.into_response();
@@ -232,7 +238,7 @@ async fn delete_user_existing_removes_only_that_user() {
     delete_user(&repo, gone.id).await.expect("delete");
 
     let err = fetch_user_by_id(&repo, gone.id).await.unwrap_err();
-    assert!(matches!(err, AppError::UserNotFound(_)));
+    assert!(matches!(err, AppError::NotFound(_)));
     assert_eq!(fetch_user_by_id(&repo, keep.id).await.unwrap(), keep);
     assert_eq!(fetch_user_list(&repo).await.unwrap(), vec![keep]);
 }
@@ -342,5 +348,5 @@ async fn get_user_name_by_name_duplicates_is_500() {
     assert!(matches!(err, AppError::Internal(_)));
     let resp = err.into_response();
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(body_json(resp).await["error"], "internal server error");
+    assert_eq!(body_json(resp).await["error"], "Internal Server Error");
 }
