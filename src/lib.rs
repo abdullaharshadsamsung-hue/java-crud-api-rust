@@ -344,6 +344,15 @@ pub struct AppState {
     pub config: Arc<Config>,
 }
 
+impl AppState {
+    /// Builds the state from environment variables (see [`Config::from_env`]).
+    pub async fn from_env() -> Result<Self, std::convert::Infallible> {
+        Ok(Self {
+            config: Arc::new(Config::from_env()),
+        })
+    }
+}
+
 async fn health() -> Json<Value> {
     Json(json!({ "status": "ok" }))
 }
