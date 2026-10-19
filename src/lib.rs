@@ -147,6 +147,7 @@ pub mod error {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
                 AppError::NotFound(e) => write!(f, "not found: {e}"),
+                AppError::BadRequest(m) if m.is_empty() => write!(f, "bad request"),
                 AppError::BadRequest(m) => write!(f, "bad request: {m}"),
                 AppError::UnsupportedMediaType => write!(f, "unsupported media type"),
                 AppError::MethodNotAllowed => write!(f, "method not allowed"),
